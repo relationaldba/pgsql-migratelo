@@ -1,0 +1,21 @@
+#############################################
+# Source database
+SRC_PGHOST=<source_pg_host>
+SRC_PGPORT=5432
+SRC_PGDATABASE=<source_db>
+SRC_PGUSER=<source_pg_user>
+SRC_PGPASSWORD=<strong_password>
+SRC_PGSSLMODE=require
+
+#############################################
+# Target database
+TGT_PGHOST=<target_pg_host>
+TGT_PGPORT=5432
+TGT_PGDATABASE=<target_db>
+TGT_PGUSER=<target_pg_user>
+TGT_PGPASSWORD=<strong_password>
+TGT_PGSSLMODE=require
+
+#############################################
+# Batch size
+BATCH_SIZE=10000000
