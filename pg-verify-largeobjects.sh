@@ -15,7 +15,7 @@ if [[ -z $1 || $1 == 0 ]]; then OID_OFFSET_START=0; else OID_OFFSET_START=$1; fi
 if [[ -z $2 || $2 == 0 ]]; then OID_OFFSET_END=4294967295; else OID_OFFSET_END=$2; fi;
 
 
-# Start recording the elapsed seconds using the bash inernal counter
+# Start recording the elapsed seconds using the bash's internal counter
 SECONDS=0;
 
 
