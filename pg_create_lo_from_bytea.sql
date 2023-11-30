@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION pg_create_lo_from_bytea(lobOid int, lobData bytea)
+CREATE OR REPLACE FUNCTION pg_create_lo_from_bytea(lobOid int8, lobData bytea)
 RETURNS oid AS $$
 DECLARE 
     loid oid;
