@@ -21,50 +21,33 @@ if [[ -z $3 || $3 == 0 ]]; then OID_END=4294967295; else OID_END=$3; fi;
 # Declare variables
 #############################################
 # Source database
-# SRC_PGHOST=<source_pg_host>
-# SRC_PGPORT=5432
-# SRC_PGDATABASE=<source_db>
-# SRC_PGUSER=<source_pg_user>
-# SRC_PGPASSWORD=<strong_password>
-# SRC_PGSSLMODE=prefer
+SRC_PGHOST=<source_pg_host>
+SRC_PGPORT=5432
+SRC_PGDATABASE=<source_db>
+SRC_PGUSER=<source_pg_user>
+SRC_PGPASSWORD=<strong_password>
+SRC_PGSSLMODE=prefer
 
 #############################################
 # Target database
-# TGT_PGHOST=<target_pg_host>
-# TGT_PGPORT=5432
-# TGT_PGDATABASE=<target_db>
-# TGT_PGUSER=<target_pg_user>
-# TGT_PGPASSWORD=<strong_password>
-# TGT_PGSSLMODE=prefer
+TGT_PGHOST=<target_pg_host>
+TGT_PGPORT=5432
+TGT_PGDATABASE=<target_db>
+TGT_PGUSER=<target_pg_user>
+TGT_PGPASSWORD=<strong_password>
+TGT_PGSSLMODE=prefer
 
 #############################################
 # Batch size and jobs
-BATCH_SIZE=1000;
-LOB_JOBS=4;
-FOLLOW_LO=true
+BATCH_SIZE=10000;
+LOB_JOBS=8;
+FOLLOW_LO="true";
+VERIFY_AFTER_MIGRATE="true";
 MISSING_OIDS_FILE="missing_oids.txt"
 
 
-#############################################
-# Source database
-SRC_PGHOST=pgsql-src
-SRC_PGPORT=5432
-SRC_PGDATABASE=cdr_src
-SRC_PGUSER=postgres
-SRC_PGPASSWORD=postgres
-SRC_PGSSLMODE=prefer
-#############################################
-# Target database
-TGT_PGHOST=pgsql-tgt
-TGT_PGPORT=5432
-TGT_PGDATABASE=cdr_tgt
-TGT_PGUSER=postgres
-TGT_PGPASSWORD=postgres
-TGT_PGSSLMODE=prefer
-
 SRC_CONNSTRING="postgresql:///${SRC_PGDATABASE}?host=${SRC_PGHOST}&port=${SRC_PGPORT}&user=${SRC_PGUSER}&password=${SRC_PGPASSWORD}&sslmode=${SRC_PGSSLMODE}";
 TGT_CONNSTRING="postgresql:///${TGT_PGDATABASE}?host=${TGT_PGHOST}&port=${TGT_PGPORT}&user=${TGT_PGUSER}&password=${TGT_PGPASSWORD}&sslmode=${TGT_PGSSLMODE}";
-
 
 # Start recording the elapsed seconds using the bash's internal counter
 SECONDS=0;
@@ -144,7 +127,7 @@ function migrate_lo() {
     fi
 
     # Get the batch of large object OIDs from source store the batch locally on the disk
-    psql $SRC_CONNSTRING \
+    psql_result=$(psql $SRC_CONNSTRING \
         --csv \
         --field-separator="," \
         --tuples-only \
@@ -155,26 +138,36 @@ function migrate_lo() {
             FROM pg_largeobject_metadata 
             WHERE oid >= ${oid_start}
             AND oid < ${oid_end}
-            ORDER BY oid";
+            ORDER BY oid;" 2>&1);
     
     (( $? != 0 )) \
         && err "Failed to export LOBs between range oid: ${oid_start} and oid: ${oid_end}" \
+        && err "${psql_result}" \
         && return_code=1 \
         && rm -f "${lo_file}" \
         && return $return_code;
 
-    # Import the LOBs into the target database
-    psql $TGT_CONNSTRING \
-        --quiet \
-        --command "CREATE TEMP TABLE temp_largeobject (loid bigint, data bytea);" \
-        --command "\COPY temp_largeobject FROM ${lo_file} WITH DELIMITER ',' CSV;" \
-        --command "SELECT pg_create_lo_from_bytea(loid, data) FROM temp_largeobject;" 1>/dev/null
+    # If the fle is not empty, import the LOBs into the target database
+    if [[ -s "${lo_file}" ]]
+    then
+
+        # log "Migrating LOBs from oid ${oid_start} to ${oid_end}"
+
+        psql_result=$(psql $TGT_CONNSTRING \
+            --quiet \
+            --command "CREATE TEMP TABLE temp_largeobject (loid bigint, data bytea);" \
+            --command "\COPY temp_largeobject FROM ${lo_file} WITH DELIMITER ',' CSV;" \
+            --command "SELECT pg_create_lo_from_bytea(loid, data) FROM temp_largeobject;" 2>&1);
     
-    (( $? != 0 )) \
-        && err "Failed to import LOBs between range oid: ${oid_start} and oid: ${oid_end}" \
-        && return_code=1 \
-        && rm -f "${lo_file}" \
-        && return $return_code;
+        (( $? != 0 )) \
+            && err "Failed to import LOBs between range oid: ${oid_start} and oid: ${oid_end}" \
+            && err "${psql_result}" \
+            && return_code=1 \
+            && rm -f "${lo_file}" \
+            && return $return_code;
+
+        log "Migrated LOBs from oid ${oid_start} to ${oid_end}"
+    fi
 
     rm -f "${lo_file}";
     return $return_code;
@@ -192,28 +185,38 @@ function verify_lo() {
     # Get the batch of large object OIDs from source and target, store the batch locally on the disk
     # Its important to sort the OID list as text to allow the comm utility to perform a quick compare 
     # and list the values that are unique to source
-    psql $SRC_CONNSTRING \
+    psql_result=$(psql $SRC_CONNSTRING \
         --csv --field-separator=" " \
         --tuples-only --no-align \
         --quiet \
         --output="$lo_file_src" \
-        --command="SELECT oid, lo_get(oid)::text FROM pg_largeobject_metadata WHERE oid >= ${oid_start} AND oid < ${oid_end} ORDER BY oid::text;"
+        --command="SELECT oid, lo_get(oid)::text 
+            FROM pg_largeobject_metadata 
+            WHERE oid >= ${oid_start} 
+            AND oid < ${oid_end} 
+            ORDER BY oid::text;" 2>&1);
     
     (( $? != 0 )) \
         && err "Failed to export OIDs from source for range ${oid_start} to ${oid_end}" \
+        && err "${psql_result}" \
         && return_code=1 \
         && rm -f "${lo_file_src}" \
         && return $return_code;
 
-    psql $TGT_CONNSTRING \
+    psql_result=$(psql $TGT_CONNSTRING \
         --csv --field-separator=" " \
         --tuples-only --no-align \
         --quiet \
         --output="$lo_file_tgt"  \
-        --command="SELECT oid, lo_get(oid)::text FROM pg_largeobject_metadata WHERE oid >= ${oid_start} AND oid < ${oid_end} ORDER BY oid::text;"
+        --command="SELECT oid, lo_get(oid)::text 
+            FROM pg_largeobject_metadata 
+            WHERE oid >= ${oid_start} 
+            AND oid < ${oid_end} 
+            ORDER BY oid::text;" 2>&1);
     
     (( $? != 0 )) \
         && err "Failed to export OIDs from source for range ${oid_start} to ${oid_end}" \
+        && err "${psql_result}" \
         && return_code=1 \
         && rm -f "${lo_file_tgt}" \
         && return $return_code;
@@ -235,7 +238,7 @@ function verify_lo() {
     return $return_code;
 }
 
-function create_lo_from_bytea_function {
+function create_lo_from_bytea_function() {
 
     local return_code=0;
     local tgt_connstring=$1;
@@ -261,20 +264,20 @@ function create_lo_from_bytea_function {
         \$\$ LANGUAGE plpgsql;"
 
     # Create the function needed to restore the large objects from bytea
-    psql $tgt_connstring --quiet --command="$pg_lob_function";
+    psql_result=$(psql $tgt_connstring --quiet --command="$pg_lob_function" 2>&1);
     return_code=$?;
     
     (( $return_code != 0 )) \
         && err "Failed to create the function pg_create_lo_from_bytea" \
-        || log "Created the function pg_create_lo_from_bytea";
-
-    # (( $return_code != 0 )) \
-    #     && return $return_code;
+        && err "${psql_result}";
+        # || log "Created the function pg_create_lo_from_bytea";
 
     return $return_code;
 }
 
 
+# log "Src: ${SRC_CONNSTRING}";
+# log "Tgt: ${TGT_CONNSTRING}";
 
 # Validate the configuration 
 validate_config;
@@ -292,14 +295,26 @@ log "Target database: ${TGT_PGDATABASE}";
 log "Parallel jobs: ${LOB_JOBS}";
 log "Batch size per job: ${BATCH_SIZE}";
 
-# Get the max OID value from source and target
+# Get the min and max OID value from source and target
+SRC_MINOID=0;
+SRC_MINOID=$(psql $SRC_CONNSTRING --tuples-only --no-align --command="SELECT min(oid) FROM pg_largeobject_metadata;");
+(( $? != 0 )) \
+    && err "Unable to get the min OID value from source" \
+    && end 1;
+
 SRC_MAXOID=0;
 SRC_MAXOID=$(psql $SRC_CONNSTRING --tuples-only --no-align --command="SELECT max(oid) FROM pg_largeobject_metadata;");
 (( $? != 0 )) \
     && err "Unable to get the max OID value from source" \
     && end 1;
 
-# Set the ceiling of offset to the least of SRC_MAXOID and OID_END
+# Set the floor to greatest of SRC_MINOID and OID_START
+if (( $OID_START < $SRC_MINOID ))
+then
+    OID_START=$SRC_MINOID;
+fi
+
+# Set the ceiling to least of SRC_MAXOID and OID_END
 if (( $OID_END > $SRC_MAXOID ))
 then
     OID_END=$SRC_MAXOID;
@@ -308,13 +323,17 @@ fi
 log "OID start: ${OID_START}";
 log "OID end: ${OID_END}";
 
-# Create the LOB from bytea function in 
-create_lo_from_bytea_function $TGT_CONNSTRING;
-(( $? != 0 )) && end $?;
+
 
 
 if [[ ${ACTION} == "migrate_lo" ]]
 then
+
+    # Create the LOB from bytea function in 
+    create_lo_from_bytea_function $TGT_CONNSTRING;
+    (( $? != 0 )) \
+        && end $? \
+        || log "Created the function pg_create_lo_from_bytea";
 
     # Start the actual migration
     log "Migrating LOBs from source to target";
@@ -324,7 +343,7 @@ then
 
     while true
     do
-        sleep 0.2
+        # sleep 0.1
         # log "BGPIDS ${#BGPIDS[@]}, LOB_JOBS $LOB_JOBS, OID_OFFSET_START $OID_OFFSET_START, OID_OFFSET_END $OID_OFFSET_END"
 
         if (( ${#BGPIDS[@]} < $LOB_JOBS )) && (( $OID_OFFSET_START <= $OID_END ))
@@ -377,7 +396,10 @@ then
 
     (( $EXIT_CODE != 0 )) && end $EXIT_CODE;
 
-elif [[ ${ACTION} == "verify_lo" ]]
+fi
+
+
+if [[ ${ACTION} == "verify_lo" ]] || ${VERIFY_AFTER_MIGRATE} == "true" ]]
 then
     
     # Get the total count of LOBs from source and target
@@ -437,7 +459,7 @@ then
 
     while true
     do
-        sleep 0.2
+        # sleep 0.1
         # log "BGPIDS ${#BGPIDS[@]}, LOB_JOBS $LOB_JOBS, OID_OFFSET_START $OID_OFFSET_START, OID_OFFSET_END $OID_OFFSET_END"
 
         if (( ${#BGPIDS[@]} < $LOB_JOBS )) && (( $OID_OFFSET_START <= $OID_END ))
@@ -491,9 +513,11 @@ then
     MISSING_LOB_COUNT=$(wc -l "$MISSING_OIDS_FILE" | cut -d' ' -f1)
     
     (( $MISSING_LOB_COUNT == 0 )) \
-        && log "LOBs to migrate: ${MISSING_LOB_COUNT}, migration not required" && end 0 \
+        && log "LOBs to migrate: ${MISSING_LOB_COUNT}, migration not required" \
         || log "LOBs to migrate: ${MISSING_LOB_COUNT}, please review ${MISSING_OIDS_FILE}";
-    end $EXIT_CODE;
+    
+    [[ ${ACTION} == "verify_lo" ]] \
+        && end $EXIT_CODE;
 
 fi
 
@@ -507,7 +531,7 @@ then
     while true
     do
 
-        sleep 15;
+        sleep 60;
 
         TGT_MAXOID=$(psql $TGT_CONNSTRING --tuples-only --no-align --command="SELECT max(oid) FROM pg_largeobject_metadata;");
         (( $? != 0 )) \
@@ -519,7 +543,7 @@ then
     
         # log "BGPIDS ${#BGPIDS[@]}, LOB_JOBS $LOB_JOBS, OID_OFFSET_START $OID_OFFSET_START, OID_OFFSET_END $OID_OFFSET_END"
 
-        log "Migrating LOBs from oid ${OID_OFFSET_START}";
+        # log "Migrating LOBs from oid ${OID_OFFSET_START}";
         
         migrate_lo $OID_OFFSET_START $OID_OFFSET_END;
         (( $? != 0 )) \
